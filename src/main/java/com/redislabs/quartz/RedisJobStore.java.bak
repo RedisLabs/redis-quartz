@@ -69,9 +69,9 @@ import redis.clients.jedis.Tuple;
  * This class implements a <code>{@link org.quartz.spi.JobStore}</code> that
  * utilizes <a href="http://redis.io/">Redis</a> as a persistent storage.
  * </p>
- * 
+  * 
  * @author Matan Kehat
- */
+  */
 public class RedisJobStore implements JobStore {
 	
 	/*** Sets Keys ***/
@@ -312,7 +312,7 @@ public class RedisJobStore implements JobStore {
 	 * Creates a job group set key in the form of: 'job_group:&#60;job_group_name&#62;'
 	 *
 	 * @param groupName the group name
-	 * @return the job group set key
+	 * @return the job group key
 	 */
 	private String createJobGroupSetKey(String groupName) {
 		return "job_group:" + groupName;
@@ -576,7 +576,7 @@ public class RedisJobStore implements JobStore {
 	 * 'calendar_triggers:&#60;calendar_name&#62;'
 	 *
 	 * @param calendarName the calendar name
-	 * @return the calendar_triggers set key
+	 * @return the calendar_triggers hash key
 	 */
 	private String createCalendarTriggersSetKey(String calendarName) {
 		return "calendar_triggers:" + calendarName;
@@ -588,7 +588,7 @@ public class RedisJobStore implements JobStore {
 	 *
 	 * @param jobGroupName the job group name
 	 * @param jobName the job name
-	 * @return the job_triggers set key
+	 * @return the job_triggers hash key
 	 */
 	private String createJobTriggersSetKey(String jobGroupName, String jobName) {
 		return "job_triggers:" + jobGroupName + ":" + jobName;
@@ -599,7 +599,7 @@ public class RedisJobStore implements JobStore {
 	 * 'trigger_group:&#60;trigger_group_name&#62;'
 	 *
 	 * @param groupName the group name
-	 * @return the trigger group set key
+	 * @return the trigger group hash key
 	 */
 	private String createTriggerGroupSetKey(String groupName) {
 		return "trigger_group:" + groupName;
