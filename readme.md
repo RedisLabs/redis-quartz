@@ -68,3 +68,5 @@ To better understand the workflow and the behavior of a [Quartz Scheduler](http:
 
 [GNU General Public License](https://www.gnu.org/licenses/gpl.txt)
 
+[![githalytics.com alpha](https://cruel-carlota.pagodabox.com/e08b202aefce41667b99d181284b1f6e "githalytics.com")](http://githalytics.com/RedisLabs/redis-quartz)
+
