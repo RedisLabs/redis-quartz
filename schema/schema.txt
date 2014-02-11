@@ -1,0 +1,208 @@
+JOBS
+=====
+
+1.	Job	
+	type: Hash	
+	key: 'job:<job_group_name>:<job_name>'	
+		
+	Field			Value
+	job_class_name	the implemented job class
+	description		job's description
+	blocked_by		blocked by instance id
+	block_time		blocked timestamp
+	
+	
+2. 	JobDataMap	
+	type: Hash	
+	key: 'job_data_map:<job_group_name>:<job_name>'	
+		
+	Field	Value
+	field1	String
+	field2	String
+	...	
+	
+	
+3.	JobGroup	
+	type: Set	
+	key: 'job_group:<job_group_name>'	
+		
+	Members	
+	Job			'job:<job_group_name>:<job_name>'
+	
+	
+4.	Jobs	
+	type: Set	
+	key: 'jobs'	
+		
+	Members	
+	Job			'job:<job_group_name>:<job_name>'
+	
+	
+5.	JobGroups	
+	type: Set	
+	key: 'job_groups'	
+		
+	Members	
+	JobGroup	'job_group:<job_group_name>'
+	
+	
+6.	JobTriggers	
+	type: Set	
+	Key: 'job_triggers:job:<job_group_name>:<job_name>'	
+		
+	Members	
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'
+	
+	
+7.	PausedJobGroups	
+	type: Set	
+	Key: 'paused_job_groups'	
+		
+	Members	
+	JobGroup	'job_group:<job_group_name>'
+	
+	
+8.	BlockedJobs	
+	type: Set	
+	Key: 'blocked_jobs'	
+		
+	Members	
+	Job			'job:<job_group_name>:<job_name>'
+	
+TRIGGERS
+=========
+
+1.	Trigger	
+	type: Hash	
+	key: 'trigger:<trigger_group_name>:<trigger_name>'	
+		
+	Field						Value
+	job_hash_key				the job's key
+	next_fire_time	
+	prev_fire_time	
+	priority	
+	trigger_type	
+	calendar_name				the calendar's name
+	start_time	
+	end_time	
+	final_fire_time	
+	fire_instance_id			the firing instance id
+	misfire_instruction	
+	locked_by					locking instance id
+	lock_time					locking timestamp
+	Simple Trigger Fields	
+	repeat_count	
+	repeat_interval	
+	times_triggered	
+	Cron Trigger Fields	
+	cron_expression	
+	time_zone_id	
+	
+	
+2.	TriggerGroup	
+	type: Set	
+	Key: 'trigger_group:<trigger_group_name>'	
+		
+	Members	
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'
+	
+	
+3.	Triggers	
+	Set	
+	Key: 'triggers'	
+		
+	Members	
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'
+	
+	
+3.	TriggerGroups	
+	type: Set	
+	Key: 'trigger_groups'	
+		
+	Members	
+	TriggerGroup	'trigger_group:<trigger_group_name>'
+	
+	
+4.	PausedTriggerGroups	
+	type: Set	
+	Key: 'paused_trigger_groups'	
+		
+	Members	
+	TriggerGroup	'trigger_group:<trigger_group_name>'
+	
+TRIGGER STATES
+===============
+
+1.	Waiting						
+	type: Zset						
+	Key: 'waiting_triggers'						
+							
+	Members																		Score
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'					trigger's next fire time timestamp
+						
+						
+2.	Paused						
+	type: Zset						
+	Key: 'paused_triggers'						
+							
+	Members																		Score
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'					trigger's next fire time timestamp
+						
+						
+3.	Blocked						
+	type: Zset						
+	Key: 'blocked_triggers'						
+							
+	Members																		Score
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'					trigger's next fire time timestamp
+						
+						
+4.	Acquired						
+	type: Zset						
+	Key: 'acquired_triggers'						
+							
+	Members																		Score
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'					trigger's next fire time timestamp
+						
+						
+5.	Error						
+	type: Zset						
+	Key: 'error_triggers'						
+							
+	Members																		Score
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'					trigger's next fire time timestamp
+						
+						
+6.	Completed						
+	type: Zset						
+	Key: 'completed_triggers'						
+							
+	Members																		Score
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'					trigger's next fire time timestamp
+
+CALENDARS
+==========
+
+1.	Calendar	
+	type: Hash	
+	key: 'calendar:<calendar_name>'	
+		
+	Field					Value
+	calendar_class			the calendar's class
+	calendar_serialized		json serialized calendar
+	
+	
+2.	Calendars	
+	type: Set	
+	Key: 'calendars'	
+		
+	Members	
+	Calendar	'calendar:<calendar_name>'
+	
+	
+3.	CalendarTriggers	
+	type: Set	
+	Key: 'calendar_triggers:<calendar_name>'	
+		
+	Members	
+	Trigger		'trigger:<trigger_group_name>:<trigger_name>'
