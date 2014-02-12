@@ -1707,17 +1707,17 @@ public class RedisJobStore implements JobStore {
 	}
 		
 	private long getLastTriggersReleaseTime() {
-		long lastTriggersReleseTime = 0;
+		long lastTriggersReleaseTime = 0;
 		Jedis jedis = pool.getResource();
 		try {
 			if (jedis.exists(LAST_TRIGGERS_RELEASE_TIME))
-				lastTriggersReleseTime = Long.parseLong(jedis.get(LAST_TRIGGERS_RELEASE_TIME));
+				lastTriggersReleaseTime = Long.parseLong(jedis.get(LAST_TRIGGERS_RELEASE_TIME));
 		} catch (Exception ex) {
-			log.error("could not get last triggerrelease time");
+			log.error("could not get last trigger release time");
 		} finally {
 			pool.returnResource(jedis);
 		}
-		return lastTriggersReleseTime;
+		return lastTriggersReleaseTime;
 	}
 	
 	private void setLastTriggersReleaseTime(String time) {

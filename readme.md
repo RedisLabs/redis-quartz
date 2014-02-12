@@ -50,7 +50,7 @@ To get [Quartz](http://quartz-scheduler.org/) up and running quickly with `Redis
 
 * Only `SimpleTrigger` and `CronTrigger`are supported.
 * For any `GroupMatcher`, only a `StringOperatorName.EQUALS` operator is supported. You should note that if your scheduler is designed to compare any group of jobs, triggers, etc. with a pattern-based matcher.
-* `RedisJobStore` is designed to use multiple schedulers, but it is not making any use of the `org.quartz.scheduler.instanceName`. The only limitation here is that you should maintain the uniquness of your trigger_group_name:trigger_name, and your job_group_name:job:name and you'll be good to go with multiple schedulers.
+* `RedisJobStore` is designed to use multiple schedulers, but it is not making any use of the `org.quartz.scheduler.instanceName`. The only limitation here is that you should maintain the uniquness of your trigger_group_name:trigger_name, and your job_group_name:job_name and you'll be good to go with multiple schedulers.
 * A `Scheduler` should be started once on a machine, also to ensure releasing locked triggers of previously crashed schedulers. 
 * Data atomicity- `RedisJobStore` is not using any transaction-like mechanism, but ensures synchronization with global lockings. As a result, if a connection issue occurs during an operation, it might be partially completed.
 * `JobDataMap` values are stored and returned as Strings, so you should implement your jobs accordingly.
@@ -58,7 +58,7 @@ To get [Quartz](http://quartz-scheduler.org/) up and running quickly with `Redis
 
 ## Known Issues
 
-1. Quartz's standard JobStores are sometimes considering triggers without a next fire time as tirggers in a WAITING state. As `RedisJobStore` is using redis [Sorted Sets](http://redis.io/topics/data-types#sorted-sets) to implement the trigger state, using their next fire time as the score, it will consider these triggers as stateless.
+1. Quartz's standard JobStores are sometimes considering triggers without a next fire time as tirggers in a WAITING state. As `RedisJobStore` is using redis [Sorted Sets](http://redis.io/topics/data-types#sorted-sets) to maintain triggers states, using their next fire time as the score, it will consider these triggers as stateless.
 
 ## Redis Schema
 
