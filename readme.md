@@ -10,7 +10,7 @@ To get [Quartz](http://quartz-scheduler.org/) up and running quickly with `Redis
     org.quartz.jobStore.misfireThreshold: 60000
     
     # setting the scheduler's JobStore to RedisJobStore
-    org.quartz.jobStore.class: com.garantia.quartz.RedisJobStore
+    org.quartz.jobStore.class: com.redislabs.quartz.RedisJobStore
     
     # setting your redis host
     org.quartz.jobStore.host: <your_redis_host>
