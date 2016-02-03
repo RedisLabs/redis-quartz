@@ -1,5 +1,7 @@
 package com.redislabs.quartz;
 
+import com.github.jedis.lock.JedisLock;
+import com.google.gson.Gson;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
@@ -19,8 +21,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
-import java.util.concurrent.TimeoutException;
-
 import org.quartz.Calendar;
 import org.quartz.CronTrigger;
 import org.quartz.DisallowConcurrentExecution;
@@ -36,9 +36,9 @@ import org.quartz.SchedulerConfigException;
 import org.quartz.SchedulerException;
 import org.quartz.SimpleTrigger;
 import org.quartz.Trigger;
-import org.quartz.TriggerKey;
 import org.quartz.Trigger.CompletedExecutionInstruction;
 import org.quartz.Trigger.TriggerState;
+import org.quartz.TriggerKey;
 import org.quartz.impl.matchers.GroupMatcher;
 import org.quartz.impl.matchers.StringMatcher.StringOperatorName;
 import org.quartz.impl.triggers.CronTriggerImpl;
@@ -52,10 +52,6 @@ import org.quartz.spi.TriggerFiredResult;
 import org.quartz.utils.ClassUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.google.gson.Gson;
-
-import redis.clients.jedis.Client;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPoolConfig;
@@ -131,7 +127,7 @@ public class RedisJobStore implements JobStore {
 	/*** Class Members ***/
 	private final Logger log = LoggerFactory.getLogger(getClass());
 	private static JedisPool pool;	
-	private static JedisPool lockPool;
+   private static JedisLock lockPool;
 	private ClassLoadHelper loadHelper;
 	private SchedulerSignaler signaler;
 	private String instanceId;
@@ -163,10 +159,8 @@ public class RedisJobStore implements JobStore {
     	if (lockTimeout == 0)
     		lockTimeout = 10 * 60 * 1000; // 10 Minutes locking timeout
     	
-    	if (password != null)
-    		lockPool = new JedisPool(config, host, port, lockTimeout, password);	    		
-    	else
-    		lockPool = new JedisPool(config, host, port, lockTimeout);    	
+      lockPool = new JedisLock(pool.getResource(), "JobLock", lockTimeout);
+
 	}	
 
 	@Override
@@ -204,10 +198,7 @@ public class RedisJobStore implements JobStore {
 	public void shutdown() {
 		if (pool != null)
 			pool.destroy();
-		
-		if (lockPool != null)
-			lockPool.destroy();
-	}
+   }
 
 	@Override
 	public boolean supportsPersistence() {
@@ -230,27 +221,25 @@ public class RedisJobStore implements JobStore {
 			throws ObjectAlreadyExistsException, JobPersistenceException {
 		String jobHashKey = createJobHashKey(newJob.getKey().getGroup(), newJob.getKey().getName());
 		String triggerHashKey = createTriggerHashKey(newTrigger.getKey().getGroup(), newTrigger.getKey().getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();			
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			storeJob(newJob, false, jedis);
 			storeTrigger(newTrigger, false, jedis);			
-		} catch (Exception ex) {
-			log.error("could not store job: " + jobHashKey + " and trigger: " + triggerHashKey, ex);
-			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
-		} finally {
-			pool.returnResource(jedis);
-			unlock();
+      } catch (ObjectAlreadyExistsException ex) {
+         log.warn("could not store job: " + jobHashKey + " and trigger: " + triggerHashKey, ex);
+      } catch (Exception ex) {
+         log.error("could not store job: " + jobHashKey + " and trigger: " + triggerHashKey, ex);
+         throw new JobPersistenceException(ex.getMessage(), ex.getCause());
+      } finally {
+         lockPool.release();
 		}		
 	}
 
 	@Override
-	public void storeJob(JobDetail newJob, boolean replaceExisting)
-			throws ObjectAlreadyExistsException, JobPersistenceException {		
+   public void storeJob(JobDetail newJob, boolean replaceExisting) throws JobPersistenceException {
 		String jobHashKey = createJobHashKey(newJob.getKey().getGroup(), newJob.getKey().getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();			
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			storeJob(newJob, replaceExisting, jedis);
 		} catch (ObjectAlreadyExistsException ex) {
 			log.warn(jobHashKey + " already exists", ex);
@@ -259,8 +248,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not store job: " + jobHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}		
 	}
 
@@ -281,7 +269,7 @@ public class RedisJobStore implements JobStore {
 		if (jedis.exists(jobHashKey) && !replaceExisting)
 			throw new ObjectAlreadyExistsException(newJob);
 					
-		Map<String, String> jobDetails = new HashMap<String, String>();
+      Map<String, String> jobDetails = new HashMap<>();
 		jobDetails.put(DESCRIPTION, newJob.getDescription() != null ? newJob.getDescription() : "");
 		jobDetails.put(JOB_CLASS, newJob.getJobClass().getName());
 		jobDetails.put(IS_DURABLE, Boolean.toString(newJob.isDurable()));
@@ -340,7 +328,7 @@ public class RedisJobStore implements JobStore {
 	}
 
 	private Map<String, String> getStringDataMap(JobDataMap jobDataMap) {
-		Map<String, String> stringDataMap = new HashMap<String, String>();
+      Map<String, String> stringDataMap = new HashMap<>();
 		for (String key : jobDataMap.keySet())
 			stringDataMap.put(key, jobDataMap.get(key).toString());
 					
@@ -352,9 +340,8 @@ public class RedisJobStore implements JobStore {
 			Map<JobDetail, Set<? extends Trigger>> triggersAndJobs,
 			boolean replace) throws ObjectAlreadyExistsException,
 			JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			// verifying jobs and triggers don't exist
 			if (!replace) {
@@ -381,8 +368,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not store jobs and triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -390,9 +376,8 @@ public class RedisJobStore implements JobStore {
 	public boolean removeJob(JobKey jobKey) throws JobPersistenceException {
 		boolean removed = false;
 		String jobHashKey = createJobHashKey(jobKey.getGroup(), jobKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			if (jedis.exists(jobHashKey)) {
 				removeJob(jobKey, jedis);
 				removed = true;
@@ -401,8 +386,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not remove job: " + jobHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return removed;
 	}
@@ -431,7 +415,7 @@ public class RedisJobStore implements JobStore {
 	@Override
 	public boolean removeJobs(List<JobKey> jobKeys)
 			throws JobPersistenceException {
-		boolean removed =  jobKeys.size() > 0 ? true : false;
+      boolean removed = jobKeys.size() > 0;
 		for (JobKey jobKey : jobKeys)
 			removed = removed && removeJob(jobKey);
 		
@@ -442,16 +426,14 @@ public class RedisJobStore implements JobStore {
 	public JobDetail retrieveJob(JobKey jobKey) throws JobPersistenceException {
 		JobDetail jobDetail = null;
 		String jobHashkey = createJobHashKey(jobKey.getGroup(), jobKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			jobDetail = retrieveJob(jobKey, jedis);			
-		} catch (Exception ex) {
+      } catch (JobPersistenceException | ClassNotFoundException | InterruptedException ex) {
 			log.error("could not retrieve job: " + jobHashkey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return jobDetail;
 	}
@@ -468,9 +450,10 @@ public class RedisJobStore implements JobStore {
 	private JobDetail retrieveJob(JobKey jobKey, Jedis jedis) throws JobPersistenceException, ClassNotFoundException {
 		String jobHashkey = createJobHashKey(jobKey.getGroup(), jobKey.getName());
 		String jobDataMapHashKey = createJobDataMapHashKey(jobKey.getGroup(), jobKey.getName());
-		if (!jedis.exists(jobHashkey))
-			throw new JobPersistenceException("job: " + jobHashkey + " does not exist");
-		
+      if (!jedis.exists(jobHashkey)) {
+         log.warn("job: " + jobHashkey + " does not exist");
+         return null;
+      }
 		Class<Job> jobClass = (Class<Job>) loadHelper.getClassLoader().loadClass(jedis.hget(jobHashkey, JOB_CLASS));
 		JobBuilder jobBuilder = JobBuilder.newJob(jobClass)
 									.withIdentity(jobKey)
@@ -490,9 +473,8 @@ public class RedisJobStore implements JobStore {
 	public void storeTrigger(OperableTrigger newTrigger, boolean replaceExisting)
 			throws ObjectAlreadyExistsException, JobPersistenceException {
 		String triggerHashKey = createTriggerHashKey(newTrigger.getKey().getGroup(), newTrigger.getKey().getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();			
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			storeTrigger(newTrigger, replaceExisting, jedis);
 		} catch (ObjectAlreadyExistsException ex) {
 			log.warn(triggerHashKey + " already exists", ex);
@@ -501,8 +483,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not store trigger: " + triggerHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();			
+         lockPool.release();
 		}
 	}
 
@@ -516,16 +497,17 @@ public class RedisJobStore implements JobStore {
 	 * @throws ObjectAlreadyExistsException
 	 */
 	private void storeTrigger(OperableTrigger newTrigger, boolean replaceExisting, Jedis jedis)
-			throws JobPersistenceException, ObjectAlreadyExistsException {
+           throws JobPersistenceException {
 		String triggerHashKey = createTriggerHashKey(newTrigger.getKey().getGroup(), newTrigger.getKey().getName());
 		String triggerGroupSetKey = createTriggerGroupSetKey(newTrigger.getKey().getGroup());
 		String jobHashkey = createJobHashKey(newTrigger.getJobKey().getGroup(), newTrigger.getJobKey().getName());
 		String jobTriggerSetkey = createJobTriggersSetKey(newTrigger.getJobKey().getGroup(), newTrigger.getJobKey().getName());
 		
-		if (jedis.exists(triggerHashKey) && !replaceExisting)
-			throw new ObjectAlreadyExistsException(newTrigger);
-		
-		Map<String, String> trigger = new HashMap<String, String>();
+      if (jedis.exists(triggerHashKey) && !replaceExisting) {
+         ObjectAlreadyExistsException ex = new ObjectAlreadyExistsException(newTrigger);
+         log.warn(ex.toString());
+      }
+      Map<String, String> trigger = new HashMap<>();
 		trigger.put(JOB_HASH_KEY, jobHashkey);
 		trigger.put(DESCRIPTION, newTrigger.getDescription() != null ? newTrigger.getDescription() : "");
 		trigger.put(NEXT_FIRE_TIME, newTrigger.getNextFireTime() != null ? Long.toString(newTrigger.getNextFireTime().getTime()) : "");
@@ -622,9 +604,8 @@ public class RedisJobStore implements JobStore {
 			throws JobPersistenceException {
 		boolean removed = false;
 		String triggerHashKey = createTriggerHashKey(triggerKey.getGroup(), triggerKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			if (jedis.exists(triggerHashKey)) {
 				removeTrigger(triggerKey, jedis);
 				removed = true;
@@ -633,8 +614,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not remove trigger: " + triggerHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return removed;		
 	}
@@ -694,17 +674,14 @@ public class RedisJobStore implements JobStore {
 	 */
 	private long setTriggerState(RedisTriggerState state, double score, String triggerHashKey) throws JobPersistenceException {
 		long success = -1;
-		Jedis jedis = pool.getResource();
-		try {
+      try (Jedis jedis = pool.getResource()) {
 			long removed = unsetTriggerState(triggerHashKey);			
 			if (state != null && removed >= 0)
 				success = jedis.zadd(state.getKey(), score, triggerHashKey);			
 		} catch (Exception ex) {
-			log.error("could not set state " + state.toString() + " for trigger: " + triggerHashKey);
+         log.error("could not set state " + state + " for trigger: " + triggerHashKey);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
-		} finally {
-			pool.returnResource(jedis);
-		}
+      }
 		return success;		
 	}
 	
@@ -719,8 +696,7 @@ public class RedisJobStore implements JobStore {
 	 */
 	private long unsetTriggerState(String triggerHashKey) throws JobPersistenceException {
 		Long removed = -1L;
-		Jedis jedis = pool.getResource();
-		try {			
+      try (Jedis jedis = pool.getResource()) {
 			Pipeline p = jedis.pipelined();
 			p.zrem(RedisTriggerState.WAITING.getKey(), triggerHashKey);
 			p.zrem(RedisTriggerState.PAUSED.getKey(), triggerHashKey);
@@ -743,16 +719,14 @@ public class RedisJobStore implements JobStore {
 			removed = -1L;
 			log.error("could not unset state for trigger: " + triggerHashKey);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
-		} finally {
-			pool.returnResource(jedis);
-		}
+      }
 		return removed;
 	}
 
 	@Override
 	public boolean removeTriggers(List<TriggerKey> triggerKeys)
 			throws JobPersistenceException {
-		boolean removed =  triggerKeys.size() > 0 ? true : false;
+      boolean removed = triggerKeys.size() > 0;
 		for (TriggerKey triggerKey : triggerKeys)
 			removed = removeTrigger(triggerKey) && removed;
 				
@@ -764,9 +738,8 @@ public class RedisJobStore implements JobStore {
 			OperableTrigger newTrigger) throws JobPersistenceException {
 		boolean replaced = false;
 		String triggerHashKey = createTriggerHashKey(triggerKey.getGroup(), triggerKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			String jobHashKey =jedis.hget(triggerHashKey, JOB_HASH_KEY); 
 			if (jobHashKey == null || jobHashKey.isEmpty())
@@ -782,8 +755,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not replace trigger: " + triggerHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return replaced;
 	}
@@ -792,16 +764,14 @@ public class RedisJobStore implements JobStore {
 	public OperableTrigger retrieveTrigger(TriggerKey triggerKey) throws JobPersistenceException {
 		OperableTrigger trigger = null;
 		String triggerHashKey = createTriggerHashKey(triggerKey.getGroup(), triggerKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			trigger = retrieveTrigger(triggerKey, jedis);			
 		} catch (Exception ex) {
 			log.error("could not retrieve trigger: " + triggerHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return trigger;
 	}
@@ -822,9 +792,10 @@ public class RedisJobStore implements JobStore {
 			return null;
 		}			
 		
-		if (!jedis.exists(trigger.get(JOB_HASH_KEY)))
-			throw new JobPersistenceException("job: " + trigger.get(JOB_HASH_KEY) + " does not exist for trigger: " + triggerHashKey);
-		
+      if (!jedis.exists(trigger.get(JOB_HASH_KEY))) {
+         log.warn("job: " + trigger.get(JOB_HASH_KEY) + " does not exist for trigger: " + triggerHashKey);
+         return null;
+      }
 		return toOperableTrigger(triggerKey, trigger);
 	}
 
@@ -875,38 +846,31 @@ public class RedisJobStore implements JobStore {
 	@Override
 	public boolean checkExists(JobKey jobKey) throws JobPersistenceException {
 		String jobHashKey = createJobHashKey(jobKey.getGroup(), jobKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
+      try (Jedis jedis = pool.getResource()) {
 			return jedis.exists(jobHashKey);
 		} catch (Exception ex) {
 			log.error("could not check if job: " + jobHashKey + " exists", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
-		} finally {
-			pool.returnResource(jedis);
-		}		
+      }
 	}
 
 	@Override
 	public boolean checkExists(TriggerKey triggerKey)
 			throws JobPersistenceException {
 		String triggerHashKey = createTriggerHashKey(triggerKey.getGroup(), triggerKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
+      try (Jedis jedis = pool.getResource()) {
 			return jedis.exists(triggerHashKey);
 		} catch (Exception ex) {
 			log.error("could not check if trigger: " + triggerHashKey + " exists", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
-		} finally {
-			pool.returnResource(jedis);
-		}
+      }
 	}
 
 	@Override
 	public void clearAllSchedulingData() throws JobPersistenceException {
 		
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			// removing all jobs
 			Set<String> jobs = jedis.smembers(JOBS_SET);
@@ -928,8 +892,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not remove scheduling data", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -939,9 +902,8 @@ public class RedisJobStore implements JobStore {
 			throws ObjectAlreadyExistsException, JobPersistenceException {
 		
 		String calendarHashKey = createCalendarHashKey(name);
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			storeCalendar(name, calendar, replaceExisting, updateTriggers, jedis);
 		} catch (ObjectAlreadyExistsException ex) {
 			log.warn(calendarHashKey + " already exists");
@@ -950,8 +912,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not store calendar: " + calendarHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -975,7 +936,7 @@ public class RedisJobStore implements JobStore {
 			throw new ObjectAlreadyExistsException(calendarHashKey + " already exists");
 		
 		Gson gson = new Gson();			
-		Map<String, String> calendarHash = new HashMap<String, String>();
+      Map<String, String> calendarHash = new HashMap<>();
 		calendarHash.put(CALENDAR_CLASS, calendar.getClass().getName());
 		calendarHash.put(CALENDAR_SERIALIZED, gson.toJson(calendar));
 		
@@ -1000,9 +961,8 @@ public class RedisJobStore implements JobStore {
 			throws JobPersistenceException {
 		boolean removed = false;
 		String calendarHashKey = createCalendarHashKey(calName);
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			if (jedis.exists(calendarHashKey)) {
 				removeCalendar(calName, jedis);
 				removed = true;
@@ -1011,8 +971,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not remove calendar: " + calendarHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return removed;
 	}
@@ -1043,16 +1002,14 @@ public class RedisJobStore implements JobStore {
 			throws JobPersistenceException {
 		Calendar calendar = null;
 		String calendarHashKey = createCalendarHashKey(calName);
-		Jedis jedis = pool.getResource();
-		try {
-			lock();			
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			calendar = retrieveCalendar(calName, jedis);					
 		} catch (Exception ex) {
 			log.error("could not retrieve calendar: " + calendarHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return calendar;
 	}
@@ -1076,7 +1033,7 @@ public class RedisJobStore implements JobStore {
 			
 			Gson gson = new Gson();
 			Class calClass = Class.forName(jedis.hget(calendarHashKey, CALENDAR_CLASS));
-			calendar = gson.fromJson(jedis.hget(calendarHashKey, CALENDAR_SERIALIZED), calClass);			
+         calendar = (Calendar) gson.fromJson(jedis.hget(calendarHashKey, CALENDAR_SERIALIZED), calClass);
 		} catch (ClassNotFoundException ex) {
 			log.warn("class not found for calendar: " + calName, ex);
 		}
@@ -1085,46 +1042,40 @@ public class RedisJobStore implements JobStore {
 
 	@Override
 	public int getNumberOfJobs() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			return jedis.scard(JOBS_SET).intValue();
 		} catch (Exception ex) {
 			log.error("could not get number of jobs", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
 	@Override
 	public int getNumberOfTriggers() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			return jedis.scard(TRIGGERS_SET).intValue();
 		} catch (Exception ex) {
 			log.error("could not get number of triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
 	@Override
 	public int getNumberOfCalendars() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			return jedis.scard(CALENDARS_SET).intValue();
 		} catch (Exception ex) {
 			log.error("could not get number of triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -1134,11 +1085,10 @@ public class RedisJobStore implements JobStore {
 		if (matcher.getCompareWithOperator() != StringOperatorName.EQUALS)
 			throw new UnsupportedOperationException();
 		
-		Set<JobKey> jobKeys = new HashSet<JobKey>();
+      Set<JobKey> jobKeys = new HashSet<>();
 		String jobGroupSetKey = createJobGroupSetKey(matcher.getCompareToValue());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			if(jedis.sismember(JOB_GROUPS_SET, jobGroupSetKey)) {
 				Set<String> jobs = jedis.smembers(jobGroupSetKey);
 				for(String job : jobs)
@@ -1148,8 +1098,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not get job keys for job group: " + jobGroupSetKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}			
 		
 		return jobKeys;				
@@ -1161,11 +1110,10 @@ public class RedisJobStore implements JobStore {
 		if (matcher.getCompareWithOperator() != StringOperatorName.EQUALS)
 			throw new UnsupportedOperationException();
 		
-		Set<TriggerKey> triggerKeys = new HashSet<TriggerKey>();
+      Set<TriggerKey> triggerKeys = new HashSet<>();
 		String triggerGroupSetKey = createTriggerGroupSetKey(matcher.getCompareToValue());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			if(jedis.sismember(TRIGGER_GROUPS_SET, triggerGroupSetKey)) {
 				Set<String> triggers = jedis.smembers(triggerGroupSetKey);
 				for(String trigger : triggers)
@@ -1175,8 +1123,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not get trigger keys for trigger group: " + triggerGroupSetKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		
 		return triggerKeys;
@@ -1184,43 +1131,37 @@ public class RedisJobStore implements JobStore {
 
 	@Override
 	public List<String> getJobGroupNames() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
-			return new ArrayList<String>(jedis.smembers(JOB_GROUPS_SET));
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
+         return new ArrayList<>(jedis.smembers(JOB_GROUPS_SET));
 		} catch(Exception ex) {
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}		
 	}
 
 	@Override
 	public List<String> getTriggerGroupNames() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
-			return new ArrayList<String>(jedis.smembers(TRIGGER_GROUPS_SET));
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
+         return new ArrayList<>(jedis.smembers(TRIGGER_GROUPS_SET));
 		} catch(Exception ex) {
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
 	@Override
 	public List<String> getCalendarNames() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
-			return new ArrayList<String>(jedis.smembers(CALENDARS_SET));
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
+         return new ArrayList<>(jedis.smembers(CALENDARS_SET));
 		} catch(Exception ex) {
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -1228,17 +1169,15 @@ public class RedisJobStore implements JobStore {
 	public List<OperableTrigger> getTriggersForJob(JobKey jobKey)
 			throws JobPersistenceException {
 		String jobTriggerSetkey = createJobTriggersSetKey(jobKey.getGroup(), jobKey.getName());
-		List<OperableTrigger> triggers = new ArrayList<OperableTrigger>();
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      List<OperableTrigger> triggers = new ArrayList<>();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			triggers = getTriggersForJob(jobTriggerSetkey, jedis);
 		} catch (Exception ex) {
 			log.error("could not get triggers for job_triggers: " + jobTriggerSetkey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return triggers;	
 	}
@@ -1252,7 +1191,7 @@ public class RedisJobStore implements JobStore {
 	 * @throws JobPersistenceException
 	 */
 	private List<OperableTrigger> getTriggersForJob(String jobTriggerHashkey, Jedis jedis) throws JobPersistenceException {
-		List<OperableTrigger> triggers = new ArrayList<OperableTrigger>();
+      List<OperableTrigger> triggers = new ArrayList<>();
 		Set<String> triggerHashkeys = jedis.smembers(jobTriggerHashkey);
 		for (String triggerHashkey : triggerHashkeys)
 			triggers.add(retrieveTrigger(new TriggerKey(triggerHashkey.split(":")[2], triggerHashkey.split(":")[1]), jedis));
@@ -1264,9 +1203,8 @@ public class RedisJobStore implements JobStore {
 	public TriggerState getTriggerState(TriggerKey triggerKey)
 			throws JobPersistenceException {
 		String triggerHashKey = createTriggerHashKey(triggerKey.getGroup(), triggerKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			if (jedis.zscore(RedisTriggerState.PAUSED.getKey(), triggerHashKey) != null || jedis.zscore(RedisTriggerState.PAUSED_BLOCKED.getKey(), triggerHashKey)!= null)
 				return TriggerState.PAUSED;
@@ -1284,8 +1222,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not get trigger state: " + triggerHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}	
 
@@ -1293,16 +1230,14 @@ public class RedisJobStore implements JobStore {
 	public void pauseTrigger(TriggerKey triggerKey)
 			throws JobPersistenceException {
 		String triggerHashKey = createTriggerHashKey(triggerKey.getGroup(), triggerKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();			
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			pauseTrigger(triggerKey, jedis);				
 		} catch (Exception ex) {
 			log.error("could not pause trigger: " + triggerHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -1334,19 +1269,17 @@ public class RedisJobStore implements JobStore {
 		if (matcher.getCompareWithOperator() != StringOperatorName.EQUALS)
 			throw new UnsupportedOperationException();
 		
-		Set<String> pausedTriggerdGroups = new HashSet<String>();
+      Set<String> pausedTriggerdGroups = new HashSet<>();
 		String triggerGroupSetKey = createTriggerGroupSetKey(matcher.getCompareToValue());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();			
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			if (pauseTriggers(triggerGroupSetKey, jedis))				
 				pausedTriggerdGroups.add(triggerGroupSetKey);	// as we currently support only EQUALS matcher's operator, the paused group set will consist of one paused group only.
 		} catch (Exception ex) {
 			log.error("could not pause triggers group: " + triggerGroupSetKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return pausedTriggerdGroups;
 	}
@@ -1371,16 +1304,14 @@ public class RedisJobStore implements JobStore {
 	@Override
 	public void pauseJob(JobKey jobKey) throws JobPersistenceException {
 		String jobHashKey = createJobHashKey(jobKey.getGroup(),jobKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			pauseJob(jobHashKey, jedis);	
 		} catch (Exception ex) {
 			log.error("could not pause job: " + jobHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -1407,11 +1338,10 @@ public class RedisJobStore implements JobStore {
 		if (groupMatcher.getCompareWithOperator() != StringOperatorName.EQUALS)
 			throw new UnsupportedOperationException();
 		
-		Set<String> pausedJobGroups = new HashSet<String>();
+      Set<String> pausedJobGroups = new HashSet<>();
 		String jobGroupSetKey = createJobGroupSetKey(groupMatcher.getCompareToValue());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 						
 			if (jedis.sadd(PAUSED_JOB_GROUPS_SET, jobGroupSetKey) > 0) {
 				pausedJobGroups.add(jobGroupSetKey);			
@@ -1423,8 +1353,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not pause job group: " + jobGroupSetKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}		
 		return pausedJobGroups;
 	}
@@ -1433,12 +1362,10 @@ public class RedisJobStore implements JobStore {
 	public void resumeTrigger(TriggerKey triggerKey)
 			throws JobPersistenceException {
 		String triggerHashKey = createTriggerHashKey(triggerKey.getGroup(), triggerKey.getName());
-		Jedis jedis = pool.getResource();
-		try {		 
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
-			OperableTrigger trigger = null;
-			trigger = retrieveTrigger(new TriggerKey(triggerHashKey.split(":")[2], triggerHashKey.split(":")[1]), jedis);
+         OperableTrigger trigger = retrieveTrigger(new TriggerKey(triggerHashKey.split(":")[2], triggerHashKey.split(":")[1]), jedis);
 			resumeTrigger(trigger, jedis);
 			if (trigger != null)
 				applyMisfire(trigger, jedis);
@@ -1446,8 +1373,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not resume trigger: " + triggerHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -1481,16 +1407,14 @@ public class RedisJobStore implements JobStore {
 			throws JobPersistenceException {
 		Set<String> resumedTriggerdGroups;
 		String triggerGroupSetKey = createTriggerGroupSetKey(matcher.getCompareToValue());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();								
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			resumedTriggerdGroups = resumeTriggers(triggerGroupSetKey, jedis);				
 		} catch (Exception ex) {
 			log.error("could not pause triggers group: " + triggerGroupSetKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return resumedTriggerdGroups;
 	}
@@ -1504,7 +1428,7 @@ public class RedisJobStore implements JobStore {
 	 * @throws JobPersistenceException the job persistence exception
 	 */
 	private Set<String> resumeTriggers(String triggerGroupHashKey, Jedis jedis) throws JobPersistenceException {
-		Set<String> resumedTriggerdGroups = new HashSet<String>();
+      Set<String> resumedTriggerdGroups = new HashSet<>();
 		jedis.srem(PAUSED_TRIGGER_GROUPS_SET, triggerGroupHashKey);
 		Set<String> triggerHashKeys = jedis.smembers(triggerGroupHashKey);
 		for(String triggerHashKey : triggerHashKeys) {
@@ -1518,32 +1442,28 @@ public class RedisJobStore implements JobStore {
 
 	@Override
 	public Set<String> getPausedTriggerGroups() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			return jedis.smembers(PAUSED_TRIGGER_GROUPS_SET);
 		} catch(Exception ex) {
 			log.error("could not get paused trigger groups", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
 	@Override
 	public void resumeJob(JobKey jobKey) throws JobPersistenceException {
 		String jobHashKey = createJobHashKey(jobKey.getGroup(),jobKey.getName());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();			
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			resumeJob(jobKey, jedis);	
 		} catch (Exception ex) {
 			log.error("could not resume job: " + jobHashKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -1570,11 +1490,10 @@ public class RedisJobStore implements JobStore {
 		if (matcher.getCompareWithOperator() != StringOperatorName.EQUALS)
 			throw new UnsupportedOperationException();
 		
-		Set<String> resumedJobGroups = new HashSet<String>();
+      Set<String> resumedJobGroups = new HashSet<>();
 		String jobGroupSetKey = createJobGroupSetKey(matcher.getCompareToValue());
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			if(!jedis.sismember(JOB_GROUPS_SET, jobGroupSetKey))
 				throw new JobPersistenceException("job group: " + jobGroupSetKey + " does not exist");
@@ -1589,43 +1508,38 @@ public class RedisJobStore implements JobStore {
 			log.error("could not resume job group: " + jobGroupSetKey, ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}		
 		return resumedJobGroups;
 	}
 
 	@Override
 	public void pauseAll() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
-			List<String> triggerGroups =  new ArrayList<String>(jedis.smembers(TRIGGER_GROUPS_SET));
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
+         List<String> triggerGroups = new ArrayList<>(jedis.smembers(TRIGGER_GROUPS_SET));
 			for (String triggerGroup : triggerGroups)
 				pauseTriggers(triggerGroup, jedis);
 		} catch(Exception ex) {
 			log.error("could not pause all triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
 	@Override
 	public void resumeAll() throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
-			List<String> triggerGroups = new ArrayList<String>(jedis.smembers(TRIGGER_GROUPS_SET));
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
+         List<String> triggerGroups = new ArrayList<>(jedis.smembers(TRIGGER_GROUPS_SET));
 			for (String triggerGroup : triggerGroups)
 				resumeTriggers(triggerGroup, jedis);
 		} catch(Exception ex) {
 			log.error("could not resume all triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -1637,14 +1551,13 @@ public class RedisJobStore implements JobStore {
 		keepAlive();
 		releaseTriggersCron();
 		
-		List<OperableTrigger> acquiredTriggers = new ArrayList<OperableTrigger>();		
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      List<OperableTrigger> acquiredTriggers = new ArrayList<>();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			boolean retry = true;
 			while (retry) {
 				retry = false;
-				Set<String> acquiredJobHashKeysForNoConcurrentExec = new HashSet<String>();
+            Set<String> acquiredJobHashKeysForNoConcurrentExec = new HashSet<>();
 				Set<Tuple> triggerTuples = jedis.zrangeByScoreWithScores(RedisTriggerState.WAITING.getKey(), 0d, (double)(noLaterThan + timeWindow), 0, maxCount);
 				for (Tuple triggerTuple : triggerTuples) {
 					OperableTrigger trigger = retrieveTrigger(new TriggerKey(triggerTuple.getElement().split(":")[2], triggerTuple.getElement().split(":")[1]), jedis);
@@ -1683,8 +1596,7 @@ public class RedisJobStore implements JobStore {
 			log.error("could not acquire next triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return acquiredTriggers;
 	}	
@@ -1708,27 +1620,21 @@ public class RedisJobStore implements JobStore {
 		
 	private long getLastTriggersReleaseTime() {
 		long lastTriggersReleaseTime = 0;
-		Jedis jedis = pool.getResource();
-		try {
+      try (Jedis jedis = pool.getResource()) {
 			if (jedis.exists(LAST_TRIGGERS_RELEASE_TIME))
 				lastTriggersReleaseTime = Long.parseLong(jedis.get(LAST_TRIGGERS_RELEASE_TIME));
 		} catch (Exception ex) {
 			log.error("could not get last trigger release time");
-		} finally {
-			pool.returnResource(jedis);
-		}
+      }
 		return lastTriggersReleaseTime;
 	}
 	
 	private void setLastTriggersReleaseTime(String time) {
-		Jedis jedis = pool.getResource();
-		try {
+      try (Jedis jedis = pool.getResource()) {
 			jedis.set(LAST_TRIGGERS_RELEASE_TIME, time);
 		} catch (Exception ex) {
 			log.error("could not get last triggerrelease time");
-		} finally {
-			pool.returnResource(jedis);
-		}		
+      }
 	}	
 	
 
@@ -1742,10 +1648,9 @@ public class RedisJobStore implements JobStore {
 	 */
 	private void releaseOrphanedTriggers(RedisTriggerState currentState, RedisTriggerState newState) {
 		final int ALIVE_TIMEOUT = 10 * 60 * 1000; // 10 minutes non-alive scheduler timeout
-		Map<String, Long> instanceIdLastAlive = new HashMap<String, Long>(); 
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+		Map<String, Long> instanceIdLastAlive = new HashMap<>();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			Set<Tuple> triggerTuples = jedis.zrangeWithScores(currentState.getKey(), 0, -1);
 			for (Tuple triggerTuple : triggerTuples) {
@@ -1759,11 +1664,10 @@ public class RedisJobStore implements JobStore {
 						setTriggerState(newState, triggerTuple.getScore(), triggerTuple.getElement());
 				}					
 			}						
-		} catch (Exception ex) {
+      } catch (JobPersistenceException | NumberFormatException | InterruptedException ex) {
 			log.error("could not release orphaned triggers from: " + currentState, ex);
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}		
 	}
 
@@ -1775,9 +1679,8 @@ public class RedisJobStore implements JobStore {
 	 * @param newState the new trigger's state
 	 */
 	private void releaseLockedTriggers(String lockedByInstanceId, RedisTriggerState currentState, RedisTriggerState newState) {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 						
 			Set<Tuple> triggerTuples = jedis.zrangeWithScores(currentState.getKey(), 0, -1);
 			for (Tuple triggerTuple : triggerTuples) {
@@ -1789,15 +1692,14 @@ public class RedisJobStore implements JobStore {
 		} catch (Exception ex) {
 			log.error("could not release locked triggers in: " + currentState.getKey(), ex);
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}						
 	}
 
 	private String readInstanceId(File instanceIdFile) {
 		String previousInstanceId = null;
 		InputStreamReader isr = null;
-		StringBuffer buffer = new StringBuffer();
+      StringBuilder buffer = new StringBuilder();
 		try {			
 			if (instanceIdFile.exists()) {
 				FileInputStream fis = new FileInputStream(instanceIdFile);
@@ -1847,9 +1749,8 @@ public class RedisJobStore implements JobStore {
 	 * @param blockedByInstanceId the blocking instance id
 	 */
 	private void releaseBlockedJobs(String blockedByInstanceId) {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			Set<String> blockedJobs = jedis.smembers(BLOCKED_JOBS_SET)	;
 			for (String blockedJob : blockedJobs) {
@@ -1862,8 +1763,7 @@ public class RedisJobStore implements JobStore {
 		} catch (Exception ex) {
 			log.error("could not release blocked jobs", ex);
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -1892,11 +1792,9 @@ public class RedisJobStore implements JobStore {
 	}
 
 	@Override
-	public void releaseAcquiredTrigger(OperableTrigger trigger)
-			throws JobPersistenceException {
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+   public void releaseAcquiredTrigger(OperableTrigger trigger) {
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			String triggerHashKey = createTriggerHashKey(trigger.getKey().getGroup(), trigger.getKey().getName());
 			if (jedis.zscore(RedisTriggerState.ACQUIRED.getKey(), triggerHashKey) != null) {
@@ -1907,20 +1805,18 @@ public class RedisJobStore implements JobStore {
 			}						
 		} catch(Exception ex) {
 			log.error("could not release acquired triggers", ex);
-			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
+         throw new RuntimeException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}		
 	}
 
 	@Override
 	public List<TriggerFiredResult> triggersFired(List<OperableTrigger> triggers)
 			throws JobPersistenceException {
-		List<TriggerFiredResult> results = new ArrayList<TriggerFiredResult>();
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      List<TriggerFiredResult> results = new ArrayList<>();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			for (OperableTrigger trigger : triggers) {
 				String triggerHashKey = createTriggerHashKey(trigger.getKey().getGroup(), trigger.getKey().getName());
@@ -1932,10 +1828,9 @@ public class RedisJobStore implements JobStore {
 				if (jedis.zscore(RedisTriggerState.ACQUIRED.getKey(), triggerHashKey) == null)
 					continue; // the trigger is not acquired
 
-                Calendar cal = null;
-                String calendarName = "";
+            Calendar cal = null;
 				if (trigger.getCalendarName() != null) {
-					calendarName = trigger.getCalendarName();
+               String calendarName = trigger.getCalendarName();
 					cal = retrieveCalendar(calendarName, jedis);
                     if(cal == null)
                         continue;
@@ -1978,27 +1873,24 @@ public class RedisJobStore implements JobStore {
                 
                 results.add(new TriggerFiredResult(bundle));			
 			}
-		} catch(Exception ex) {
+      } catch (JobPersistenceException | ClassNotFoundException | InterruptedException ex) {
 			log.error("could not acquire next triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 		return results;		
 	}
 
 	@Override
 	public void triggeredJobComplete(OperableTrigger trigger,
-			JobDetail jobDetail, CompletedExecutionInstruction triggerInstCode)
-			throws JobPersistenceException {
+           JobDetail jobDetail, CompletedExecutionInstruction triggerInstCode) {
 		String jobHashKey = createJobHashKey(jobDetail.getKey().getGroup(), jobDetail.getKey().getName());
 		String jobDataMapHashKey = createJobDataMapHashKey(jobDetail.getKey().getGroup(), jobDetail.getKey().getName());
 		String triggerHashKey = createTriggerHashKey(trigger.getKey().getGroup(), trigger.getKey().getName());
 		log.debug("job: " + jobHashKey + " completed");
-		Jedis jedis = pool.getResource();
-		try {
-			lock();
+      try (Jedis jedis = pool.getResource()) {
+         lockPool.acquire();
 			
 			if (jedis.exists(jobHashKey)) { // checking that the job wasn't deleted during the execution
 				String jobClassName = jedis.hget(jobHashKey, JOB_CLASS);
@@ -2073,12 +1965,11 @@ public class RedisJobStore implements JobStore {
 					signaler.signalSchedulingChange(0L);
 				}
 			}			
-		} catch(Exception ex) {
+      } catch (JobPersistenceException | NumberFormatException | InterruptedException ex) {
 			log.error("could not handle triggegered job completion", ex);
-			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
+         throw new RuntimeException(ex.getMessage(), ex.getCause());
 		} finally {
-			pool.returnResource(jedis);
-			unlock();
+         lockPool.release();
 		}
 	}
 
@@ -2129,52 +2020,12 @@ public class RedisJobStore implements JobStore {
     }
 	
 	private void keepAlive() {
-		Jedis jedis = pool.getResource();
-		try {
+      try (Jedis jedis = pool.getResource()) {
 			jedis.set(instanceId, Long.toString(System.currentTimeMillis()));			
 		} catch(Exception ex) {
 			log.error("could not keep alive");
-		} finally {
-			pool.returnResource(jedis);
-		}
-	}
-	
-	private void lock() throws JobPersistenceException {
-		Jedis jedis = lockPool.getResource();
-		try {
-			if (password != null)
-				jedis.auth(password);
-			
-			long lockTime = System.currentTimeMillis();
-			while (jedis.setnx(LOCK, Long.toString(System.currentTimeMillis())) < 1) {
-				if ((System.currentTimeMillis() - lockTime) < lockTimeout) {
-					// implementing a redis subscribe command with timeout					
-					Client client = jedis.getClient();
-					UnlockListener listener = new UnlockListener();
-					listener.proceed(client, UNLOCK_NOTIFICATIONS_CHANNEL);				
-				} else {
-					throw new TimeoutException("locking timeout");
-				}				
-			}			
-		} catch (Exception ex) {
-			log.error("could not lock mutex", ex);
-			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
-		} finally {
-			lockPool.returnResource(jedis);
-		}
-	}
-	
-	private void unlock() {
-		Jedis jedis = pool.getResource();
-		try {
-			jedis.del(LOCK);
-			jedis.publish(UNLOCK_NOTIFICATIONS_CHANNEL, "unlocked");
-		} catch(Exception ex) {
-			log.error("could not unlock mutex", ex);
-		} finally {
-			pool.returnResource(jedis);
-		} 
-	}
+      }
+   }
 
 	public long getMisfireThreshold() {
 		 return misfireThreshold;
