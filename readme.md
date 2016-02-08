@@ -5,32 +5,32 @@ A [Quartz Scheduler](http://quartz-scheduler.org/) JobStore that uses [Redis](ht
 ## Configuration
 
 To get [Quartz](http://quartz-scheduler.org/) up and running quickly with `RedisJobStore`, use the following example to configure your `quartz.properties` file:
-    
-    # setting the scheduler's misfire threshold, in milliseconds 
+
+    # setting the scheduler's misfire threshold, in milliseconds
     org.quartz.jobStore.misfireThreshold: 60000
-    
+
     # setting the scheduler's JobStore to RedisJobStore
     org.quartz.jobStore.class: com.redislabs.quartz.RedisJobStore
-    
+
     # setting your redis host
     org.quartz.jobStore.host: <your_redis_host>
-    
+
     # setting your redis port
     org.quartz.jobStore.port: <your_redis_port>
-    
+
     # setting your redis password (optional)
     org.quartz.jobStore.password: <your_redis_password>
-    
+
     # setting a 'releaseTriggersInterval' will trigger a mechanism for releasing triggers of non-alive schedulers in a given interval, in milliseconds
     org.quartz.jobStore.releaseTriggersInterval: 600000
-    
+
     # setting a 'instanceIdFilePath' will release triggers of previous schedulers on startup
     org.quartz.jobStore.instanceIdFilePath: /etc/quartz
-    
+
 
 ## External Libraries
 
-`RedisJobStore` uses the [jedis](https://github.com/xetorthio/jedis) and [gson](https://code.google.com/p/google-gson/) libraries, so you'll have to download them and add them to your project's classpath or define the relevant Maven dependencies:
+`RedisJobStore` uses the [jedis](https://github.com/xetorthio/jedis), [gson](https://code.google.com/p/google-gson/) and [jedis-lock](https://github.com/abelaska/jedis-lock) libraries, so you'll have to download them and add them to your project's classpath or define the relevant Maven dependencies:
 
     <dependency>
 		<groupId>redis.clients</groupId>
@@ -44,6 +44,12 @@ To get [Quartz](http://quartz-scheduler.org/) up and running quickly with `Redis
      	<version>2.2.4</version>
     </dependency>
 
+    <dependency>
+      <groupId>com.github.jedis-lock</groupId>
+      <artifactId>jedis-lock</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+
 ## Limitations
 
 `RedisJobStore` attempts to be fully compliant with all of [Quartz](http://quartz-scheduler.org/)'s features, but currently has some limitations that you should be aware of:
@@ -51,7 +57,7 @@ To get [Quartz](http://quartz-scheduler.org/) up and running quickly with `Redis
 * Only `SimpleTrigger` and `CronTrigger`are supported.
 * For any `GroupMatcher`, only a `StringOperatorName.EQUALS` operator is supported. You should note that if your scheduler is designed to compare any group of jobs, triggers, etc. with a pattern-based matcher.
 * `RedisJobStore` is designed to use multiple schedulers, but it is not making any use of the `org.quartz.scheduler.instanceName`. The only limitation here is that you should maintain the uniquness of your trigger_group_name:trigger_name, and your job_group_name:job_name and you'll be good to go with multiple schedulers.
-* A `Scheduler` should be started once on a machine, also to ensure releasing locked triggers of previously crashed schedulers. 
+* A `Scheduler` should be started once on a machine, also to ensure releasing locked triggers of previously crashed schedulers.
 * Data atomicity- `RedisJobStore` is not using any transaction-like mechanism, but ensures synchronization with global lockings. As a result, if a connection issue occurs during an operation, it might be partially completed.
 * `JobDataMap` values are stored and returned as Strings, so you should implement your jobs accordingly.
 * `RedisJobStore` is firing triggers only by their fire time, without any cosideration to their priorities at all.
