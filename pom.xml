@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+   <modelVersion>4.0.0</modelVersion>
+   <groupId>com.redislabs.quartz</groupId>
+   <artifactId>redis-quartz</artifactId>
+   <version>1.0-SNAPSHOT</version>
+   <packaging>jar</packaging>
+   <name>redis-quartz</name>
+
+   <properties>
+      <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+      <maven.compiler.source>1.7</maven.compiler.source>
+      <maven.compiler.target>1.7</maven.compiler.target>
+
+      <version.org.quartz-scheduler.quartz>2.2.2</version.org.quartz-scheduler.quartz>
+      <version.redis.clients.jedis>2.8.0</version.redis.clients.jedis>
+      <version.com.github.jedis-lock.jedis-lock>1.0.0</version.com.github.jedis-lock.jedis-lock>
+
+      <version.com.google.code.gson.gson>2.2.4</version.com.google.code.gson.gson>
+   </properties>
+
+   <dependencies>
+      <dependency>
+         <groupId>org.quartz-scheduler</groupId>
+         <artifactId>quartz</artifactId>
+         <version>${version.org.quartz-scheduler.quartz}</version>
+      </dependency>
+      <dependency>
+         <groupId>redis.clients</groupId>
+         <artifactId>jedis</artifactId>
+         <version>${version.redis.clients.jedis}</version>
+         <type>jar</type>
+      </dependency>
+      <dependency>
+         <groupId>com.google.code.gson</groupId>
+         <artifactId>gson</artifactId>
+         <version>${version.com.google.code.gson.gson}</version>
+      </dependency>
+      <dependency>
+         <groupId>com.github.jedis-lock</groupId>
+         <artifactId>jedis-lock</artifactId>
+         <version>${version.com.github.jedis-lock.jedis-lock}</version>
+      </dependency>
+   </dependencies>
+</project>
