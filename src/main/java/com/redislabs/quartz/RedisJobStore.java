@@ -1045,7 +1045,7 @@ public class RedisJobStore implements JobStore {
 	public int getNumberOfJobs() throws JobPersistenceException {
       try (Jedis jedis = pool.getResource()) {
          lockPool.acquire();
-			return jedis.scard(JOBS_SET).intValue();
+			return (int) jedis.scard(JOBS_SET);
 		} catch (Exception ex) {
 			log.error("could not get number of jobs", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
@@ -1058,7 +1058,7 @@ public class RedisJobStore implements JobStore {
 	public int getNumberOfTriggers() throws JobPersistenceException {
       try (Jedis jedis = pool.getResource()) {
          lockPool.acquire();
-			return jedis.scard(TRIGGERS_SET).intValue();
+			return (int) jedis.scard(TRIGGERS_SET);
 		} catch (Exception ex) {
 			log.error("could not get number of triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
@@ -1071,7 +1071,7 @@ public class RedisJobStore implements JobStore {
 	public int getNumberOfCalendars() throws JobPersistenceException {
       try (Jedis jedis = pool.getResource()) {
          lockPool.acquire();
-			return jedis.scard(CALENDARS_SET).intValue();
+			return (int) jedis.scard(CALENDARS_SET);
 		} catch (Exception ex) {
 			log.error("could not get number of triggers", ex);
 			throw new JobPersistenceException(ex.getMessage(), ex.getCause());
@@ -1559,7 +1559,7 @@ public class RedisJobStore implements JobStore {
 			while (retry) {
 				retry = false;
             Set<String> acquiredJobHashKeysForNoConcurrentExec = new HashSet<>();
-				Set<Tuple> triggerTuples = jedis.zrangeByScoreWithScores(RedisTriggerState.WAITING.getKey(), 0d, (double)(noLaterThan + timeWindow), 0, maxCount);
+				List<Tuple> triggerTuples = jedis.zrangeByScoreWithScores(RedisTriggerState.WAITING.getKey(), 0d, (double)(noLaterThan + timeWindow), 0, maxCount);
 				for (Tuple triggerTuple : triggerTuples) {
 					OperableTrigger trigger = retrieveTrigger(new TriggerKey(triggerTuple.getElement().split(":")[2], triggerTuple.getElement().split(":")[1]), jedis);
 									
@@ -1653,7 +1653,7 @@ public class RedisJobStore implements JobStore {
       try (Jedis jedis = pool.getResource()) {
          lockPool.acquire();
 			
-			Set<Tuple> triggerTuples = jedis.zrangeWithScores(currentState.getKey(), 0, -1);
+			List<Tuple> triggerTuples = jedis.zrangeWithScores(currentState.getKey(), 0, -1);
 			for (Tuple triggerTuple : triggerTuples) {
 				String lockedByInstanceId = jedis.hget(triggerTuple.getElement(), LOCKED_BY);
 				if (lockedByInstanceId != null && !lockedByInstanceId.isEmpty()) {
@@ -1683,7 +1683,7 @@ public class RedisJobStore implements JobStore {
       try (Jedis jedis = pool.getResource()) {
          lockPool.acquire();
 						
-			Set<Tuple> triggerTuples = jedis.zrangeWithScores(currentState.getKey(), 0, -1);
+			List<Tuple> triggerTuples = jedis.zrangeWithScores(currentState.getKey(), 0, -1);
 			for (Tuple triggerTuple : triggerTuples) {
 				if (lockedByInstanceId != null && lockedByInstanceId.equals(jedis.hget(triggerTuple.getElement(), LOCKED_BY))) {
 					log.debug("releasing trigger: " + triggerTuple.getElement() + " from: " + currentState.getKey());
@@ -2102,4 +2102,17 @@ public class RedisJobStore implements JobStore {
 			log.debug("psubscribing to channels pattern: " + pattern + ", subscribed channels: " + subscribedChannels);		
 		}		
 	}
+
+        @Override
+        public void resetTriggerFromErrorState(TriggerKey triggerKey) throws JobPersistenceException {
+                // No-op
+                log.debug("resetTriggerFromErrorState not implemented");
+        }
+
+        @Override
+        public long getAcquireRetryDelay(int failureCount) {
+                // No-op
+                log.debug("getAcquireRetryDelay not implemented");
+                return 5000; // wait 5 seconds
+        }
 }
